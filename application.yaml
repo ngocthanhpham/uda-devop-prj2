@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Application infrastructure for Udagram application
+
+Parameters:
+  VPCID:
+    Type: String
+  PublicSubnet1ID:
+    Type: String
+  PublicSubnet2ID:
+    Type: String
+  PrivateSubnet1ID:
+    Type: String
+  PrivateSubnet2ID:
+    Type: String
+
+Resources:
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: UdagramALB
+      Subnets:
+        - !Ref PublicSubnet1ID
+        - !Ref PublicSubnet2ID
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApplicationTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ApplicationTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPCID
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0d5eff06f840b45e9 # Ubuntu 22.04 LTS in us-east-1 (change if necessary)
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !Ref InstanceSecurityGroup
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            apt-get update
+            apt-get install -y nginx
+            service nginx start
+        IamInstanceProfile:
+          Name: UdagramInstanceProfile
+      LaunchTemplateName: UdagramLaunchTemplate
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: 4
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MaxSize: 4
+      MinSize: 2
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1ID
+        - !Ref PrivateSubnet2ID
+      TargetGroupARNs:
+        - !Ref ApplicationTargetGroup
+
+    S3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: udagram-static-content
+        AccessControl: PublicRead
+
+    S3BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref S3Bucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:GetObject
+              Resource: !Sub "${S3Bucket.Arn}/*"
+
+    InstanceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: S3AccessPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource: !Sub "${S3Bucket.Arn}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+      InstanceProfileName: UdagramInstanceProfile
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access for instances
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access for Load Balancer
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNS name of the load balancer
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+    Export:
+      Name: LoadBalancerDNSName
